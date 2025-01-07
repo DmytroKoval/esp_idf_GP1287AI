@@ -1,0 +1,8 @@
+version: "1.0.0"
+description: GP1287 driver
+
+tags:
+  - lcd
+
+dependencies:
+  idf: ">=5.0"
