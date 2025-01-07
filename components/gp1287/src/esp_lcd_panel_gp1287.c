@@ -15,6 +15,8 @@
 #include "freertos/projdefs.h"
 #include "hal/gpio_types.h"
 #include "soc/gpio_num.h"
+#include "sdkconfig.h"
+
 #if CONFIG_LCD_ENABLE_DEBUG_LOG
 // The local log level must be defined before including esp_log.h
 // Set the maximum log level for this source file
@@ -30,90 +32,18 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_check.h"
-#include "sdkconfig.h"
 
+// public include
 #include "esp_lcd_panel_gp1287.h"
+
+// private include
 #include "gp1287_commands.h"
 
 static const char *TAG = "LCD PANEL GP1287";
 
-#define LCD_CHECK(a, str, ret)  if(!(a)) {                           \
-        ESP_LOGE(TAG,"%s:%d (%s):%s", __FILE__, __LINE__, __FUNCTION__, str);   \
-        return (ret);                                                           \
-    }
-
-/*
-
-// Default values.
-#define GP1287_DEFAULT_COL1        0x00 //
-#define GP1287_DEFAULT_COL2        0x77 //
-#define GP1287_DEFAULT_ROW1        0x00 //
-#define GP1287_DEFAULT_ROW2        0x7f //
-#define GP1287_DEFAULT_REMAP1      0x00 //
-#define GP1287_DEFAULT_REMAP2      0x01 //
-#define GP1287_DEFAULT_START       0x00 //
-#define GP1287_DEFAULT_OFFSET      0x00 //
-#define GP1287_DEFAULT_VDD         0x01 //
-#define GP1287_DEFAULT_PHASE       0x74 //
-#define GP1287_DEFAULT_CLOCK       0x50 //
-#define GP1287_DEFAULT_ENHANCE_A1  0xa2 //
-#define GP1287_DEFAULT_ENHANCE_A2  0xb5 //
-#define GP1287_DEFAULT_GPIOS       0x0a //
-#define GP1287_DEFAULT_PERIOD      0x08 //
-#define GP1287_DEFAULT_PRE_VOLT    0x17 //
-#define GP1287_DEFAULT_COM_VOLT    0x04 //
-#define GP1287_DEFAULT_CONTRAST    0x7f //
-#define GP1287_DEFAULT_BRIGHTNESS  0xff //
-#define GP1287_DEFAULT_MUX         0x7f //
-#define GP1287_DEFAULT_ENHANCE_B1  0xa2 //
-#define GP1287_DEFAULT_ENHANCE_B2  0x20 //
-
-// GPIO states.
-#define GP1287_INPUT_COMMAND 0 // Enable command mode for DC# pin.
-#define GP1287_INPUT_DATA    1 // Enable data mode for DC# pin.
-#define GP1287_RESET_ON      0 // Hardware reset.
-#define GP1287_RESET_OFF     1 // Normal operation.
-
-// Ranges.
-#define GP1287_COLS_MIN       0x00 // Start column.
-#define GP1287_COLS_MAX       0x77 // End column.
-#define GP1287_ROWS_MIN       0x00 // Start row.
-#define GP1287_ROWS_MAX       0x7f // End row.
-
-// Settings.
-#define GP1287_INC_COLS       0x00 // Increment cols.
-#define GP1287_INC_ROWS       0x01 // Increment rows.
-#define GP1287_SCAN_RIGHT     0x00 // Scan columns left to right.
-#define GP1287_SCAN_LEFT      0x02 // Scan columns right to left.
-#define GP1287_SCAN_DOWN      0x00 // Scan rows from top to bottom.
-#define GP1287_SCAN_UP        0x10 // Scan rows from bottom to top.
-#define GP1287_VDD_EXTERNAL   0x00 // Use external VDD regulator.
-#define GP1287_VDD_INTERNAL   0x01 // Use internal VDD regulator (reset).
-
-// Enable/disable.
-#define GP1287_PARTIAL_ON      0x01 // Partial mode on.
-#define GP1287_PARTIAL_OFF     0x00 // Partial mode off.
-#define GP1287_SPLIT_DISABLE   0x00 // Disable odd/even split of COMs.
-#define GP1287_SPLIT_ENABLE    0x20 // Enable odd/even split of COMS.
-#define GP1287_DUAL_DISABLE    0x00 // Disable dual COM line mode.
-#define GP1287_DUAL_ENABLE     0x10 // Enable dual COM line mode.
-#define GP1287_REMAP_DISABLE   0x00 // Disable nibble re-map.
-#define GP1287_REMAP_ENABLE    0x04 // Enable nibble re-map.
-#define GP1287_COMMAND_LOCK    0x16 // Command lock.
-#define GP1287_COMMAND_UNLOCK  0x12 // Command unlock.
-
-// Resets
-#define GP1287_CLOCK_DIV_RESET  0x01
-#define GP1287_CLOCK_FREQ_RESET 0xc0
-#define GP1287_PERIOD_RESET     0x08
-
-// Column offset
-#define GP1287_COL_OFFSET       0x1c // Based on example code.
-*/
 static esp_err_t panel_gp1287_reset(esp_lcd_panel_t *panel);
 static esp_err_t panel_gp1287_init(esp_lcd_panel_t *panel);
 static esp_err_t panel_gp1287_del(esp_lcd_panel_t *panel);
-
 static esp_err_t panel_gp1287_draw_bitmap(esp_lcd_panel_t *panel, int x_start, int y_start, int x_end, int y_end, const void *color_data);
 static esp_err_t panel_gp1287_invert_color(esp_lcd_panel_t *panel, bool invert_color_data);
 static esp_err_t panel_gp1287_mirror(esp_lcd_panel_t *panel, bool mirror_x, bool mirror_y);
@@ -121,6 +51,7 @@ static esp_err_t panel_gp1287_swap_xy(esp_lcd_panel_t *panel, bool swap_axes);
 static esp_err_t panel_gp1287_set_gap(esp_lcd_panel_t *panel, int x_gap, int y_gap);
 static esp_err_t panel_gp1287_disp_on_off(esp_lcd_panel_t *panel, bool off);
 static esp_err_t panel_gp1287_disp_sleep(esp_lcd_panel_t *panel, bool sleep);
+
 typedef struct {
     esp_lcd_panel_t base;
     esp_lcd_panel_io_handle_t io;
@@ -134,6 +65,8 @@ typedef struct {
     bool rotate;
     gpio_num_t filament_en_gpio_num;
 } gp1287_panel_t;
+
+static uint8_t *gbuf;
 
 esp_err_t configure_panel_gpio(gpio_num_t reset_pin_num, gpio_num_t filament_enable_pin_num)
 {
@@ -261,7 +194,6 @@ static esp_err_t panel_gp1287_reset(esp_lcd_panel_t *panel)
 
     return ESP_OK;
 }
-static uint8_t *gbuf;
 
 static esp_err_t panel_gp1287_init(esp_lcd_panel_t *panel)
 {
@@ -328,7 +260,6 @@ static esp_err_t panel_gp1287_init(esp_lcd_panel_t *panel)
     return ESP_OK;
 }
 
-
 static esp_err_t panel_gp1287_draw_bitmap(esp_lcd_panel_t *panel, int x_start, int y_start, int x_end, int y_end, const void *color_data)
 {
     gp1287_panel_t *gp1287 = __containerof(panel, gp1287_panel_t, base);
@@ -374,20 +305,6 @@ static esp_err_t panel_gp1287_draw_bitmap(esp_lcd_panel_t *panel, int x_start, i
 
     return ESP_OK;
 }
-/*
-static esp_err_t gp1287_set_display_area(esp_lcd_panel_t *panel)
-{
-    gp1287_panel_t *gp1287 = __containerof(panel, gp1287_panel_t, base);
-    esp_lcd_panel_io_handle_t io = gp1287->io;
-
-    
-
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, 0x80, (uint8_t []) { command_param }, 1),
-        TAG, "io tx param GP1287_CMD_INVERT_ON/OFF failed");
-        
-    return ESP_OK;
-}
-*/
 
 static esp_err_t panel_gp1287_invert_color(esp_lcd_panel_t *panel, bool invert_color_data)
 {
