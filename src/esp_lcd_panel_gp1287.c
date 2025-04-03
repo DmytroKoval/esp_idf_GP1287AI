@@ -1,22 +1,17 @@
 /*
- *  Created on: 2024-12-30
- *      Author: koshm
+ * SPDX-FileCopyrightText: 2021-2023 Espressif Systems (Shanghai) CO LTD
  *
- * SPDX-License-Identifier: GPL-3.0-only
+ * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "esp_err.h"
+#include "esp_heap_caps.h"
+#include "hal/gpio_types.h"
+#include "soc/gpio_num.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <sys/cdefs.h>
-
-#include "esp_err.h"
-#include "esp_heap_caps.h"
-#include "freertos/projdefs.h"
-#include "hal/gpio_types.h"
-#include "soc/gpio_num.h"
-#include "sdkconfig.h"
-
 #if CONFIG_LCD_ENABLE_DEBUG_LOG
 // The local log level must be defined before including esp_log.h
 // Set the maximum log level for this source file
@@ -28,22 +23,34 @@
 #include "esp_lcd_panel_interface.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_dev.h"
+#include "esp_lcd_panel_gp1287.h"
 #include "esp_lcd_panel_ops.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_check.h"
-
-// public include
+#include "sdkconfig.h"
 #include "esp_lcd_panel_gp1287.h"
-
-// private include
 #include "gp1287_commands.h"
 
-static const char *TAG = "LCD PANEL GP1287";
+static const char *TAG = "lcd_panel.gp1287";
+
+#define LCD_CHECK(a, str, ret)  if(!(a)) {                           \
+        ESP_LOGE(TAG,"%s:%d (%s):%s", __FILE__, __LINE__, __FUNCTION__, str);   \
+        return (ret);                                                           \
+    }
+
+
+#define GP1287_CMD_RESET            (0xAA)
+#define GP1287_CMD_SET_BRIGHTNESS   (0xA0)
+#define GP1287_CMD_SET_OSC          (0x78)
+#define GP1287_CMD_SET_VFDMODE      (0xCC)
+#define GP1287_CMD_SET_DISPAREA     (0xE0)
+#define GP1287_CMD_WRITE_GRAM       (0xF0)
 
 static esp_err_t panel_gp1287_reset(esp_lcd_panel_t *panel);
 static esp_err_t panel_gp1287_init(esp_lcd_panel_t *panel);
 static esp_err_t panel_gp1287_del(esp_lcd_panel_t *panel);
+
 static esp_err_t panel_gp1287_draw_bitmap(esp_lcd_panel_t *panel, int x_start, int y_start, int x_end, int y_end, const void *color_data);
 static esp_err_t panel_gp1287_invert_color(esp_lcd_panel_t *panel, bool invert_color_data);
 static esp_err_t panel_gp1287_mirror(esp_lcd_panel_t *panel, bool mirror_x, bool mirror_y);
@@ -64,20 +71,19 @@ typedef struct {
     bool mirror;
     bool rotate;
     gpio_num_t filament_en_gpio_num;
+    // uint16_t brightness;
 } gp1287_panel_t;
-
-static uint8_t *gbuf;
 
 esp_err_t configure_panel_gpio(gpio_num_t reset_pin_num, gpio_num_t filament_enable_pin_num)
 {
     uint64_t pin_bitmask = 0ULL;
 
     if (reset_pin_num != GPIO_NUM_NC) {
-        pin_bitmask |= (1ULL << reset_pin_num);
+        pin_bitmask |= (1 << reset_pin_num);
     }
 
     if (filament_enable_pin_num > GPIO_NUM_NC) {
-        pin_bitmask |= 1ULL << filament_enable_pin_num;
+        pin_bitmask |= (1 << filament_enable_pin_num);
     }
 
     if (pin_bitmask == 0)
@@ -86,12 +92,14 @@ esp_err_t configure_panel_gpio(gpio_num_t reset_pin_num, gpio_num_t filament_ena
     }
     
     gpio_config_t gpio_conf = {
-        .pin_bit_mask = pin_bitmask,
         .mode = GPIO_MODE_OUTPUT,  
-        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pin_bit_mask = pin_bitmask
     };
+    //gpio_conf
+    //;
     
     return gpio_config(&gpio_conf);
 }
@@ -111,12 +119,12 @@ esp_err_t esp_lcd_new_panel_gp1287(const esp_lcd_panel_io_handle_t io,
     ESP_GOTO_ON_FALSE(io && panel_dev_config && ret_panel, ESP_ERR_INVALID_ARG, err, TAG, "invalid argument");
     ESP_GOTO_ON_FALSE(panel_dev_config->bits_per_pixel == 1, ESP_ERR_INVALID_ARG, err, TAG, "bpp must be 1");
     
-    gp1287 = calloc(sizeof(gp1287_panel_t), 1);
+    gp1287 = calloc(1, sizeof(gp1287_panel_t)); 
     ESP_GOTO_ON_FALSE(gp1287, ESP_ERR_NO_MEM, err, TAG, "no mem for gp1287 panel");
 
     
-    ESP_GOTO_ON_FALSE(configure_panel_gpio(panel_dev_config->reset_gpio_num, 
-        gp1287_config->filament_en_io_num), ESP_ERR_INVALID_STATE, err, TAG, "gpio config failed");
+    configure_panel_gpio(panel_dev_config->reset_gpio_num, 
+        gp1287_config->filament_en_io_num);
     
     gp1287->io = io;
     gp1287->bits_per_pixel = panel_dev_config->bits_per_pixel;
@@ -135,7 +143,7 @@ esp_err_t esp_lcd_new_panel_gp1287(const esp_lcd_panel_io_handle_t io,
     gp1287->base.disp_sleep = panel_gp1287_disp_sleep;
     
     *ret_panel = &(gp1287->base);
-    ESP_LOGD(TAG, "new gp1287 panel @%p", gp1287);
+    ESP_LOGD(TAG, "New GP1287 panel @%p", gp1287);
 
     return ESP_OK;
 
@@ -163,6 +171,14 @@ esp_err_t esp_lcd_panel_gp1287_set_offset(esp_lcd_panel_handle_t panel, int offs
     return ESP_OK;
 }
 
+esp_err_t esp_lcd_panel_set_brightness(const esp_lcd_panel_handle_t panel, uint16_t brightness)
+{
+    gp1287_panel_t *gp1287 = __containerof(panel, gp1287_panel_t, base);
+     esp_lcd_panel_io_handle_t io = gp1287->io;
+    //gp1287->brightness = brightness & 0x3FF;
+    esp_lcd_panel_io_tx_param(io, 0xA0, (uint8_t []) { (uint8_t)((brightness & 0x0300) >> 8), (uint8_t)(brightness & 0xFF) }, 2);
+    return ESP_OK;
+}
 
 static esp_err_t panel_gp1287_del(esp_lcd_panel_t *panel)
 {
@@ -175,7 +191,7 @@ static esp_err_t panel_gp1287_del(esp_lcd_panel_t *panel)
     {
         gpio_reset_pin(gp1287->filament_en_gpio_num);
     }
-    ESP_LOGD(TAG, "del gp1287 panel @%p", gp1287);
+    ESP_LOGD(TAG, "Delete GP1287 panel @%p", gp1287);
     free(gp1287);
     return ESP_OK;
 }
@@ -194,49 +210,66 @@ static esp_err_t panel_gp1287_reset(esp_lcd_panel_t *panel)
 
     return ESP_OK;
 }
+static uint8_t *gbuf;
 
 static esp_err_t panel_gp1287_init(esp_lcd_panel_t *panel)
 {
     gp1287_panel_t *gp1287 = __containerof(panel, gp1287_panel_t, base);
     esp_lcd_panel_io_handle_t io = gp1287->io;
+    if (gp1287->filament_en_gpio_num != GPIO_NUM_NC)
+    {
+        gpio_set_level(gp1287->filament_en_gpio_num, 1);
+        // filament warmup time
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
     
     /* Software reset */
     esp_lcd_panel_io_tx_param(io, GP1287_CMD_RESET, NULL, 0);
     vTaskDelay(pdMS_TO_TICKS(5));
 
     /* Oscillation Setting */
-    esp_lcd_panel_io_tx_param(io, GP1287_CMD_SET_OSC, (uint8_t []) { 0x08 }, 2);
+    // esp_lcd_panel_io_tx_param(io, 0x78, (uint8_t []) { 0x08 }, 1);
+    esp_lcd_panel_io_tx_color(io, -1,
+        (uint8_t []) {GP1287_CMD_SET_OSC, 0x08 }, 2);
 
     /* VFD Mode Setting */
-    esp_lcd_panel_io_tx_param(io, GP1287_CMD_SET_VFDMODE, (uint8_t []) { 0x02, 0x00 }, 2);
+    // esp_lcd_panel_io_tx_param(io, GP1287_CMD_SET_VFDMODE, (uint8_t []) { 0x02, 0x00 }, 2);
+    esp_lcd_panel_io_tx_color(io, -1,
+        (uint8_t []) {GP1287_CMD_SET_VFDMODE, 0x02, 0x00 }, 3);
     
     /* Display Area Setting */
     // esp_lcd_panel_io_tx_param(io, 0xE0, (uint8_t []) { 0xFF, 0x31, 0x00, 0x20, 0x00, 0x00, 0x00 }, 7);
-    esp_lcd_panel_io_tx_param(io, GP1287_CMD_SET_DISPAREA, (uint8_t []) { 0xFF, 0x31, 0x00, 0x20, 0x00, 0x00, 0x80 }, 7);
+    esp_lcd_panel_io_tx_color(io, -1, (uint8_t []) { GP1287_CMD_SET_DISPAREA,
+        0xFF, 0x31, 0x00, 0x20, 0x00, 0x00, 0x80 }, 8);
         
     /* Internal Speed Setting */
-    esp_lcd_panel_io_tx_param(io, GP1287_CMD_SET_SPEED, (uint8_t []) {0x20, 0x3F, 0x00, 0x01 }, 4);
+    // esp_lcd_panel_io_tx_param(io, 0xB1,
+    //     (uint8_t []) {0x20, 0x3F, 0x00, 0x01 }, 4);
+    esp_lcd_panel_io_tx_color(io, -1,
+        (uint8_t []) { 0xB1, 0x20, 0x3F, 0x00, 0x01 }, 5);
     
     /* Dimming level Setting (1024 level, 0x3FF max) */
-    esp_lcd_panel_io_tx_param(io, GP1287_CMD_SET_DIMMING, (uint8_t []) { 0x00, 0x30 }, 2);
+    esp_lcd_panel_io_tx_param(io, GP1287_CMD_SET_BRIGHTNESS, (uint8_t []) { 0x00, 0x10 }, 2);
+    // esp_lcd_panel_io_tx_color(io, -1, (uint8_t []) { 0xA0, 0x00, 0x60 }, 3);
     
     /* Memory Map Clear */
-    esp_lcd_panel_io_tx_param(io, GP1287_CMD_MEMCLR, NULL, 0);
+    esp_lcd_panel_io_tx_param(io, 0x55, NULL, 0);
     vTaskDelay(pdMS_TO_TICKS(20));
 
     /* DW1 position setting (Set Display Area offset) */
     esp_lcd_panel_io_tx_param(io, 0xC0, (uint8_t []) { 0x00, 0x00 }, 2);
+    // esp_lcd_panel_io_tx_color(io, -1, (uint8_t []) { 0xC0, 0x00, 0x04 }, 3);
     
-    /* DW2 position setting ? */
+    /* DW2 position setting */
     // esp_lcd_panel_io_tx_param(io, 0xD0, (uint8_t []) { 0x00, 0x3C }, 2);
     // esp_lcd_panel_io_tx_color(io, -1, (uint8_t []) { 0xD0, 0x00, 0x3C }, 3);
     
-    /* Internal Command ? */
+    /* Internal Command */
     // esp_lcd_panel_io_tx_param(io, 0x90, (uint8_t []) { 0x00 }, 1);
     // esp_lcd_panel_io_tx_color(io, -1, (uint8_t []) { 0x90, 0x00 }, 2);
     
     /* T1 INT Setting */
-    esp_lcd_panel_io_tx_param(io, GP1287_CMD_SET_INT, (uint8_t []) { 0x00 }, 1);
+    esp_lcd_panel_io_tx_param(io, 0x08, (uint8_t []) { 0x00 }, 1);
     // esp_lcd_panel_io_tx_color(io, -1, (uint8_t []) { 0x08, 0x00 }, 2);
     
     /* Display Mode Setting */
@@ -250,13 +283,13 @@ static esp_err_t panel_gp1287_init(esp_lcd_panel_t *panel)
      *  0  0  *  0  0  0  *  1 - invert scan
     **/
     // esp_lcd_panel_io_tx_param(io, 0x80, (uint8_t []) { 0b00000000 }, 1);
-    esp_lcd_panel_io_tx_param(io, GP1287_CMD_SET_DISPMODE, (uint8_t []) { 0b00000000 }, 1);
+    esp_lcd_panel_io_tx_color(io, -1, (uint8_t []) { 0x80, 0b00000000 }, 2);
     
     /* Exit standby Mode */
     esp_lcd_panel_io_tx_param(io, 0x6D, NULL, 0);
-
-    gbuf = (uint8_t *)heap_caps_calloc(256 * (128 >> 3), 1, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-
+    
+    gbuf = (uint8_t *)calloc(3 + 256 * 16, 1);
+    
     return ESP_OK;
 }
 
@@ -264,47 +297,54 @@ static esp_err_t panel_gp1287_draw_bitmap(esp_lcd_panel_t *panel, int x_start, i
 {
     gp1287_panel_t *gp1287 = __containerof(panel, gp1287_panel_t, base);
     esp_lcd_panel_io_handle_t io = gp1287->io;
-    ESP_RETURN_ON_FALSE(y_start < y_end && x_start < x_end, ESP_ERR_INVALID_ARG, TAG, "draw bitmap: x0(%d) >= x1(%d) or y0(%d) >= y1(%d)", x_start, x_end, y_start, y_end);
+
+    // ESP_RETURN_ON_FALSE(y_start < y_end && x_start < x_end, ESP_ERR_INVALID_ARG, TAG, "draw bitmap: x0(%d) > x1(%d) or y0(%d) > y1(%d)", x_start, x_end, y_start, y_end);
+
+    esp_err_t ret = ESP_OK;
 
     uint16_t height = y_end - y_start;
-    
-    
     uint16_t width = x_end - x_start;
-    uint16_t return_length = (((height) >> 3) << 3) - 1;
+    uint16_t return_length = (height & 0xF8) - 1;
+
+    size_t data_len = width * (height >> 3);
     
     gbuf[0] = x_start & 0xFF;
     gbuf[1] = y_start & 0x7F;
     gbuf[2] = return_length;
-    // adding extra gap ??
-    // x0 += gp1287->x_gap;
-    // uint16_t x1 = x0 + (x_end - x_start);
-    // y0 += gp1287->y_gap;
-    // uint16_t y1 = y0 + (y_end - y_start);
-    // y0 &= 0x78; 
-    
-    uint8_t data_height = height >> 3; // "height" of data buf in BYTES (pixel_height / 8)
-    size_t data_len = width * data_height; 
 
-    // convert color_data to GP1287 data format
-    for (int x = 0, xh = 0; x < width; x++)
+    // memcpy(gbuf + 3, color_data, data_len);
+
+    // lvgl bitmap transform
+    for (int x = x_start; x < x_end; x++)
     {
-        xh = x * data_height;
-        for (int y = 0; y < data_height; y++)
+        for (int y = (y_start >> 3); y < (y_end >> 3); y++)
         {
-            uint32_t src_idx = y * width + x;
-            uint32_t dest_idx = xh + y + 3;
-            gbuf[dest_idx] = ((uint8_t *)color_data)[src_idx];
+            int src_idx = y * 256 + x;
+            int dest_idx = x * 16 + y;
+            gbuf[3 + dest_idx] = ((uint8_t *)color_data)[src_idx];
         }
     }
+    ESP_GOTO_ON_ERROR(esp_lcd_panel_io_tx_color(io, GP1287_CMD_WRITE_GRAM, gbuf, data_len + 3),
+        cleanup, TAG, "io tx param GP1287_CMD_WRITE_GRAM");
 
-//    ESP_LOGI(TAG, "x0:%d, y0: %d, x1: %d, y1: %d", x_start, y_start, x_end, y_end);
-//    ESP_LOGI(TAG, "width:%d, height: %d, data-height: %d\nreturn_length: %d, data_length: %d", width, height, height >> 3, return_length, data_len);
+cleanup:
+    // heap_caps_free(gbuf);
+    return ret;
+}
+/*
+static esp_err_t gp1287_set_display_area(esp_lcd_panel_t *panel)
+{
+    gp1287_panel_t *gp1287 = __containerof(panel, gp1287_panel_t, base);
+    esp_lcd_panel_io_handle_t io = gp1287->io;
 
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_color(io, GP1287_CMD_WRITE_GRAM, gbuf, data_len + 3),
-        TAG, "io tx param GP1287_CMD_WRITE_GRAM");
+    
 
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, 0x80, (uint8_t []) { command_param }, 1),
+        TAG, "io tx param GP1287_CMD_INVERT_ON/OFF failed");
+        
     return ESP_OK;
 }
+*/
 
 static esp_err_t panel_gp1287_invert_color(esp_lcd_panel_t *panel, bool invert_color_data)
 {
@@ -323,6 +363,26 @@ static esp_err_t panel_gp1287_invert_color(esp_lcd_panel_t *panel, bool invert_c
 
 static esp_err_t panel_gp1287_mirror(esp_lcd_panel_t *panel, bool mirror_x, bool mirror_y)
 {
+    /*
+    gp1287_panel_t *gp1287 = __containerof(panel, gp1287_panel_t, base);
+    esp_lcd_panel_io_handle_t io = gp1287->io;
+
+    int command = 0;
+    if (mirror_x) {
+        command = GP1287_CMD_set_m;
+    } else {
+        command = GP1287_CMD_MIRROR_X_OFF;
+    }
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, command, NULL, 0), TAG,
+                        "io tx param GP1287_CMD_MIRROR_X_ON/OFF failed");
+    if (mirror_y) {
+        command = GP1287_CMD_MIRROR_Y_ON;
+    } else {
+        command = GP1287_CMD_MIRROR_Y_OFF;
+    }
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, command, NULL, 0), TAG,
+                        "io tx param GP1287_CMD_MIRROR_Y_ON/OFF failed");
+    */
     return ESP_OK;
 }
 
@@ -359,10 +419,10 @@ static esp_err_t panel_gp1287_disp_on_off(esp_lcd_panel_t *panel, bool on_off)
     if (on_off) {
         command = 0b00000000;
     } else {
-        command = 0b00010000;
+        command = 0b00000001;
     }
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, GP1287_CMD_SET_DISPMODE, (uint8_t []) { command }, 1),
-        TAG, "io tx param GP1287_CMD_DISP_ON_OFF failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_color(io, -1, (uint8_t []) { 0x80, command }, 2), TAG,
+                        "io tx param GP1287_CMD_DISP_ON_OFF failed");
     return ESP_OK;
 }
 
@@ -370,17 +430,15 @@ static esp_err_t panel_gp1287_disp_sleep(esp_lcd_panel_t *panel, bool sleep)
 {
     gp1287_panel_t *gp1287 = __containerof(panel, gp1287_panel_t, base);
     esp_lcd_panel_io_handle_t io = gp1287->io;
-    
     if (sleep) {
-        ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, GP1287_CMD_STANDBY, NULL, 0), TAG, "Display sleep failed");
-        gpio_set_level(gp1287->filament_en_gpio_num, 0);
+        ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, 0x61, NULL, 0), TAG, "Display sleep failed");
+        // filament_level = 0;
     } else {
-        ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, GP1287_CMD_WAKEUP, NULL, 0), TAG, "Display wake-up failed");
-        ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, GP1287_CMD_SET_DISPMODE, (uint8_t []) { 0x00 }, 1), TAG, "Display set mode failed");
-        gpio_set_level(gp1287->filament_en_gpio_num, 1);
-        vTaskDelay(pdMS_TO_TICKS(5)); // filament warmup delay
+        ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, 0x6D, NULL, 0), TAG, "Display wake-up failed");
+        ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, 0x80, (uint8_t []) { 0x00 }, 1), TAG, "Display set mode failed");
+        // filament_level = 0;
     }
-     
+        // 
     
     return ESP_OK;
 }

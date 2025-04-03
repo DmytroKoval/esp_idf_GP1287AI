@@ -1,10 +1,7 @@
 /*
- * gp1287_commands.h
+ * SPDX-FileCopyrightText: 2021-2023 Espressif Systems (Shanghai) CO LTD
  *
- *  Created on: 2024-12-30
- *      Author: koshm
- *
- * SPDX-License-Identifier: GPL-3.0-only
+ * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
 
@@ -20,9 +17,7 @@ extern "C" {
 #endif
 
 #define GP1287_DISPLAY_WIDTH        (256)
-#define GP1287_DISPLAY_HEIGHT       (128)
-#define GP1287_DISPLAY_H_RES        (256)
-#define GP1287_DISPLAY_V_RES        (50)
+#define GP1287_DISPLAY_HEIGHT       (80)
 
 typedef struct 
 {
@@ -58,6 +53,8 @@ esp_err_t esp_lcd_new_panel_gp1287(const esp_lcd_panel_io_handle_t io,
     esp_lcd_panel_handle_t *ret_panel);
 
 esp_err_t esp_lcd_panel_gp1287_set_offset(const esp_lcd_panel_handle_t panel, int offset_x, int offset_y);
+
+esp_err_t esp_lcd_panel_set_brightness(const esp_lcd_panel_handle_t panel, uint16_t brightness);
 
 #ifdef __cplusplus
 }
